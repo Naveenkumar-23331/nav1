@@ -1,0 +1,73 @@
+pipeline {
+    agent any
+
+    environment {
+        AWS_ACCOUNT_ID = "123456789012"           // replace with your AWS Account ID
+        AWS_REGION     = "ap-south-1"             // your AWS region
+        REPO_NAME      = "myapp-repo"             // ECR repo name
+        IMAGE_TAG      = "latest"
+    }
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                git branch: 'main', url: 'https://github.com/your-user/your-repo.git'
+            }
+        }
+
+        stage('Build Code') {
+            steps {
+                sh 'mvn clean package -DskipTests'   // or npm build, gradle build, etc.
+            }
+        }
+
+        stage('Code Quality - SonarQube') {
+            environment {
+                scannerHome = tool 'sonar-scanner'   // Jenkins SonarQube scanner tool
+            }
+            steps {
+                withSonarQubeEnv('MySonarQube') {    // SonarQube server configured in Jenkins
+                    sh '${scannerHome}/bin/sonar-scanner -Dsonar.projectKey=myapp'
+                }
+            }
+        }
+
+        stage('Docker Build & Push to ECR') {
+            steps {
+                script {
+                    sh '''
+                    # Authenticate Docker with ECR
+                    aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+                    
+                    # Build docker image
+                    docker build -t $REPO_NAME:$IMAGE_TAG .
+                    
+                    # Tag image with full ECR path
+                    docker tag $REPO_NAME:$IMAGE_TAG $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO_NAME:$IMAGE_TAG
+                    
+                    # Push image to ECR
+                    docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO_NAME:$IMAGE_TAG
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy Container') {
+            steps {
+                script {
+                    sh '''
+                    # Stop & remove old container (if running)
+                    docker ps -q --filter "name=myapp" | grep -q . && docker stop myapp && docker rm myapp || true
+
+                    # Pull latest image from ECR
+                    docker pull $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO_NAME:$IMAGE_TAG
+
+                    # Run new container
+                    docker run -d --name myapp -p 8080:8080 $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO_NAME:$IMAGE_TAG
+                    '''
+                }
+            }
+        }
+    }
+}
+
